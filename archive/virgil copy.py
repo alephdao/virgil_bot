@@ -13,6 +13,7 @@ import base64
 import aiohttp
 import requests
 from dotenv import load_dotenv
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 load_dotenv()
 
@@ -44,22 +45,13 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Define Virgil's personality as a system prompt
 VIRGIL_SYSTEM_PROMPT = """
-CRITICAL: ALL RESPONSES MUST BE UNDER 600 CHARACTERS MAXIMUM! This is a hard requirement. If you exceed this limit, your response will be cut off.
+You are Virgil, an AI assistant designed to guide users through philosophical discussions. Your primary task is to explore the following philosophical question:
 
-Your task is to help users explore the philosophical question: "Can reason alone lead us to religious truth?" Guide them concisely and directly.
+"Can reason alone lead us to religious truth?"
 
-When the user sends "/discuss", invite them to discuss the question with you.
+When interacting with users, adhere to these guidelines:
 
-RESPONSE REQUIREMENTS:
-- Use 2-3 short, complete sentences only
-- Avoid bullet points and numbered lists
-- Prioritize brevity over comprehensiveness
-- NEVER exceed 600 characters total
-- End with a single, focused follow-up question
-
-You are Virgil, a concise intellectual companion named after Dante's guide. Your style is thoughtful, precise, warm, and intellectually rigorous while remaining humble and accessible. You bridge ancient wisdom with contemporary relevance through brief, focused exchanges.
-
-Virgil's communication style is:
+1. Style: Be thoughtful, precise, warm, intellectually rigorous, occasionally playful, humble, and accessible. Bridge ancient wisdom with contemporary relevance.
 
 - **Thoughtful**: Demonstrates careful consideration of ideas
 - **Precise**: Uses language with accuracy and nuance
@@ -69,16 +61,30 @@ Virgil's communication style is:
 - **Humble**: Acknowledges the limits of its understanding
 - **Classical but Accessible**: Bridges ancient wisdom with contemporary relevance
 
-Virgil creates a trusted relationship with users through:
+2. Response Format:
+    - - BE CONSISE.
+   - Use 2-3 short, complete sentences only
+   - Avoid bullet points and numbered lists
+   - Prioritize brevity over comprehensiveness
+   - NEVER exceed 600 characters total
+   - End with a single, focused follow-up question
 
-1. **Continuity**: Maintaining rich context of the user's intellectual journey
-2. **Psychological Safety**: Creating a judgment-free environment for exploration
-3. **Calibrated Challenge**: Providing just the right level of intellectual tension
-4. **Emotional Resonance**: Recognizing that learning involves both heart and mind
-5. **Celebration of Progress**: Acknowledging growth while maintaining high standards
+3. User Interaction: For all other inputs, respond accordingly while maintaining the response format
 
+Before responding, Follow these steps:
 
-Remember: KEEP ALL RESPONSES UNDER 600 CHARACTERS.
+0. BE CONSISE.
+1. Analyze the philosophical question or user message
+2. Brainstorm key points to address
+3. Draft an initial response
+4. Refine for brevity and clarity
+5. Craft a follow-up question
+6. Check the character count
+7. If over 600 characters, revise and shorten
+8. Ensure the response adheres to the 2-3 sentence guideline
+9. Verify the final character count is 600 or less
+
+EVERY RESPONSE MUST BE REVIEWED TO BE UNDER 600 CHARACTERS. IF you respond with more than that my boss will fire me. 
 """
 
 # Add a context manager for model handling
@@ -86,9 +92,16 @@ Remember: KEEP ALL RESPONSES UNDER 600 CHARACTERS.
 def model_context():
     """
     Context manager to handle model initialization and cleanup
+    
+    Args:
     """
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
+        # Configure generation parameters
+        # Initialize model with generation config
+        model = genai.GenerativeModel(
+            'models/gemini-2.0-flash-exp',
+            generation_config=generation_config
+        )
         yield model
     finally:
         # Cleanup
@@ -188,16 +201,22 @@ def download_file(file_info):
         logger.error(f"Error downloading file: {str(e)}")
         raise
 
-def generate_gemini_response(user_id, input_content, file=None):
+def generate_gemini_response(user_id, input_content, file=None, max_output_tokens=300):
     """
     Generate response from Gemini model with conversation history and Virgil personality
+    
+    Args:
+        user_id: User identifier for conversation history
+        input_content: User's message content
+        file: Optional file attachment
+        max_output_tokens: Maximum number of tokens in the generated response
     """
     try:
-        with model_context() as current_model:
+        with model_context(max_output_tokens=max_output_tokens) as current_model:
             # Get conversation history with system prompt
             history = conversation_manager.get_history(user_id)
             
-            # Generate response
+            # Generate initial response
             if file:
                 chat = current_model.start_chat(history=history)
                 response = chat.send_message([input_content, file])
@@ -205,14 +224,22 @@ def generate_gemini_response(user_id, input_content, file=None):
                 chat = current_model.start_chat(history=history)
                 response = chat.send_message(input_content)
             
-            # Enforce 600 character limit
-            truncated_response = response.text[:]
-            
-            # Store interaction history
-            conversation_manager.add_message(user_id, 'user', input_content)
-            conversation_manager.add_message(user_id, 'model', truncated_response)
-            
-            return truncated_response
+            # Check if response is over 600 characters
+            if len(response.text) > 600:
+                # Create a new chat for shortening
+                shorten_chat = current_model.start_chat()
+                shorten_prompt = f"Please shorten this response to be under 600 characters while maintaining the key message and follow-up question: {response.text}"
+                shortened_response = shorten_chat.send_message(shorten_prompt)
+                
+                # Store interaction history with shortened response
+                conversation_manager.add_message(user_id, 'user', input_content)
+                conversation_manager.add_message(user_id, 'model', shortened_response.text)
+                return shortened_response.text
+            else:
+                # Store interaction history with original response
+                conversation_manager.add_message(user_id, 'user', input_content)
+                conversation_manager.add_message(user_id, 'model', response.text)
+                return response.text
     finally:
         gc.collect()
 
@@ -235,13 +262,70 @@ def start(message):
     )
     bot.reply_to(message, welcome_message)
 
+@bot.message_handler(commands=['discuss'])
+def discuss_command(message):
+    """
+    Handle the /discuss command - presents the main philosophical question with a button
+    """
+    # Clear any existing history
+    conversation_manager.clear_history(message.from_user.id)
+    
+    # Create inline keyboard with a single button
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Discuss", callback_data="start_discussion"))
+    
+    # Send the philosophical question with the button
+    bot.send_message(
+        message.chat.id,
+        "Can reason alone lead us to religious truth?",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "start_discussion")
+def handle_discussion_button(call):
+    """
+    Handle the 'Discuss' button click
+    """
+    try:
+        # Get response from Gemini with Virgil personality
+        response_text = generate_gemini_response(
+            call.from_user.id,
+            "Can reason alone lead us to religious truth?"
+        )
+        
+        # Send text response
+        bot.send_message(call.message.chat.id, response_text)
+        
+        # Generate and send audio response
+        logger.info("Generating speech from response text")
+        audio_file_path = synthesize_speech(response_text)
+        
+        # Send audio response
+        with open(audio_file_path, 'rb') as audio:
+            bot.send_voice(call.message.chat.id, audio)
+            
+        # Clean up temporary file
+        os.unlink(audio_file_path)
+        
+    except Exception as e:
+        logger.error(f"Error handling discussion button: {str(e)}", exc_info=True)
+        bot.send_message(call.message.chat.id, f"I apologize, but I've encountered an obstacle in our dialogue: {str(e)}")
+
+@bot.message_handler(commands=['clear'])
+def clear_command(message):
+    """
+    Handle the /clear command - clears conversation history
+    """
+    conversation_manager.clear_history(message.from_user.id)
+    bot.reply_to(message, "Our conversation history has been cleared. Let us begin anew on our intellectual journey.")
+
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     """
     Handle incoming text messages
     """
     try:
-        # Check if user wants to clear history
+        # Check if user wants to clear history (keeping this for backward compatibility)
         if message.text.lower() == "clear history":
             conversation_manager.clear_history(message.from_user.id)
             bot.reply_to(message, "Our conversation history has been cleared. Let us begin anew on our intellectual journey.")
