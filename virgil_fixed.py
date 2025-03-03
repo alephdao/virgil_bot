@@ -10,10 +10,8 @@ import gc
 from contextlib import contextmanager
 import logging
 import base64
-import aiohttp
 import requests
 from dotenv import load_dotenv
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 load_dotenv()
 
@@ -26,7 +24,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GOOGLE_AI_API_KEY = os.getenv("GOOGLE_AI_API_KEY")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")  # Updated to match your .env file
 
 if not BOT_TOKEN or not GOOGLE_AI_API_KEY:
     raise ValueError("Missing required credentials in environment variables")
@@ -87,16 +85,19 @@ Before responding, Follow these steps:
 EVERY RESPONSE MUST BE REVIEWED TO BE UNDER 600 CHARACTERS. IF you respond with more than that my boss will fire me. 
 """
 
+# Define generation config
+generation_config = {
+    'temperature': 0.7,
+    'top_p': 0.95
+}
+
 # Add a context manager for model handling
 @contextmanager
 def model_context():
     """
     Context manager to handle model initialization and cleanup
-    
-    Args:
     """
     try:
-        # Configure generation parameters
         # Initialize model with generation config
         model = genai.GenerativeModel(
             'models/gemini-2.0-flash-exp',
@@ -192,16 +193,62 @@ def download_file(file_info):
     """
     try:
         # Get the full file path from Telegram's API
-        file_path = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        file_path = bot.get_file(file_info.file_id).file_path
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         
-        response = requests.get(file_path)
+        response = requests.get(file_url)
         response.raise_for_status()  # Raise exception for bad status codes
         return response.content
     except Exception as e:
         logger.error(f"Error downloading file: {str(e)}")
         raise
 
-def generate_gemini_response(user_id, input_content, file=None, max_output_tokens=300):
+def shorten_text(text):
+    """
+    Use a separate Gemini model call to shorten text to under 600 characters
+    """
+    try:
+        # Create a new model instance for shortening
+        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
+        
+        # Create a new prompt for shortening
+        shorten_prompt = f"""
+        Please shorten the following text to be under 800 characters total while:
+        1. Maintaining the key message
+        2. Preserving the philosophical tone
+        3. Keeping the follow-up question at the end
+        
+        Here's the text to shorten:
+        {text}
+        """
+        
+        # Generate shortened response
+        shortened_response = model.generate_content(shorten_prompt)
+        
+        # If somehow the shortened response is still over 600 characters, truncate
+        if len(shortened_response.text) > 800:
+            # Find the last sentence end before 550 characters to leave room for a question
+            last_end = shortened_response.text[:750].rfind('.')
+            if last_end == -1:
+                # No sentence end found, just truncate
+                shortened_text = shortened_response.text[:750] + "... What are your thoughts on this?"
+            else:
+                # Add a follow-up question if there isn't one
+                shortened_text = shortened_response.text[:last_end+1]
+                if "?" not in shortened_text:
+                    shortened_text += " What do you think about this perspective?"
+                    
+            return shortened_text
+            
+        return shortened_response.text
+    except Exception as e:
+        logger.error(f"Error shortening text: {str(e)}", exc_info=True)
+        # If shortening fails, just truncate with a generic follow-up
+        return text[:550] + "... What are your thoughts on this?"
+    finally:
+        gc.collect()
+
+def generate_gemini_response(user_id, input_content, file=None):
     """
     Generate response from Gemini model with conversation history and Virgil personality
     
@@ -209,10 +256,9 @@ def generate_gemini_response(user_id, input_content, file=None, max_output_token
         user_id: User identifier for conversation history
         input_content: User's message content
         file: Optional file attachment
-        max_output_tokens: Maximum number of tokens in the generated response
     """
     try:
-        with model_context(max_output_tokens=max_output_tokens) as current_model:
+        with model_context() as current_model:
             # Get conversation history with system prompt
             history = conversation_manager.get_history(user_id)
             
@@ -224,22 +270,26 @@ def generate_gemini_response(user_id, input_content, file=None, max_output_token
                 chat = current_model.start_chat(history=history)
                 response = chat.send_message(input_content)
             
+            logger.info(f"Generated response length: {len(response.text)} characters")
+            
             # Check if response is over 600 characters
             if len(response.text) > 600:
-                # Create a new chat for shortening
-                shorten_chat = current_model.start_chat()
-                shorten_prompt = f"Please shorten this response to be under 600 characters while maintaining the key message and follow-up question: {response.text}"
-                shortened_response = shorten_chat.send_message(shorten_prompt)
+                logger.info("Response exceeds 600 characters, shortening...")
+                shortened_text = shorten_text(response.text)
+                logger.info(f"Shortened response length: {len(shortened_text)} characters")
                 
                 # Store interaction history with shortened response
                 conversation_manager.add_message(user_id, 'user', input_content)
-                conversation_manager.add_message(user_id, 'model', shortened_response.text)
-                return shortened_response.text
+                conversation_manager.add_message(user_id, 'model', shortened_text)
+                return shortened_text
             else:
                 # Store interaction history with original response
                 conversation_manager.add_message(user_id, 'user', input_content)
                 conversation_manager.add_message(user_id, 'model', response.text)
                 return response.text
+    except Exception as e:
+        logger.error(f"Error generating response: {str(e)}", exc_info=True)
+        raise
     finally:
         gc.collect()
 
@@ -262,70 +312,13 @@ def start(message):
     )
     bot.reply_to(message, welcome_message)
 
-@bot.message_handler(commands=['discuss'])
-def discuss_command(message):
-    """
-    Handle the /discuss command - presents the main philosophical question with a button
-    """
-    # Clear any existing history
-    conversation_manager.clear_history(message.from_user.id)
-    
-    # Create inline keyboard with a single button
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Discuss", callback_data="start_discussion"))
-    
-    # Send the philosophical question with the button
-    bot.send_message(
-        message.chat.id,
-        "Can reason alone lead us to religious truth?",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "start_discussion")
-def handle_discussion_button(call):
-    """
-    Handle the 'Discuss' button click
-    """
-    try:
-        # Get response from Gemini with Virgil personality
-        response_text = generate_gemini_response(
-            call.from_user.id,
-            "Can reason alone lead us to religious truth?"
-        )
-        
-        # Send text response
-        bot.send_message(call.message.chat.id, response_text)
-        
-        # Generate and send audio response
-        logger.info("Generating speech from response text")
-        audio_file_path = synthesize_speech(response_text)
-        
-        # Send audio response
-        with open(audio_file_path, 'rb') as audio:
-            bot.send_voice(call.message.chat.id, audio)
-            
-        # Clean up temporary file
-        os.unlink(audio_file_path)
-        
-    except Exception as e:
-        logger.error(f"Error handling discussion button: {str(e)}", exc_info=True)
-        bot.send_message(call.message.chat.id, f"I apologize, but I've encountered an obstacle in our dialogue: {str(e)}")
-
-@bot.message_handler(commands=['clear'])
-def clear_command(message):
-    """
-    Handle the /clear command - clears conversation history
-    """
-    conversation_manager.clear_history(message.from_user.id)
-    bot.reply_to(message, "Our conversation history has been cleared. Let us begin anew on our intellectual journey.")
-
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     """
     Handle incoming text messages
     """
     try:
-        # Check if user wants to clear history (keeping this for backward compatibility)
+        # Check if user wants to clear history
         if message.text.lower() == "clear history":
             conversation_manager.clear_history(message.from_user.id)
             bot.reply_to(message, "Our conversation history has been cleared. Let us begin anew on our intellectual journey.")
@@ -366,10 +359,10 @@ def handle_audio(message):
         
         # Get file info
         if message.voice:
-            file_info = bot.get_file(message.voice.file_id)
+            file_info = message.voice
             mime_type = 'audio/ogg; codecs=opus'  # Telegram voice messages are always in OGG format
         else:
-            file_info = bot.get_file(message.audio.file_id)
+            file_info = message.audio
             mime_type = getattr(message.audio, 'mime_type', 'audio/ogg')
         
         # Download audio data
@@ -420,4 +413,10 @@ def handle_audio(message):
 # Start the bot
 if __name__ == "__main__":
     logger.info("Virgil bot is awakening...")
-    bot.infinity_polling()
+    try:
+        # Print a more informative message
+        print("Starting Telegram bot with polling...")
+        bot.infinity_polling()
+    except Exception as e:
+        logger.error(f"Fatal error in bot startup: {str(e)}", exc_info=True)
+        print(f"Error: {str(e)}")
