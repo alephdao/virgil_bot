@@ -1,5 +1,5 @@
 import os
-from telegram.ext import Application, MessageHandler, filters, CommandHandler
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 import google.generativeai as genai
 import aiohttp
 from dotenv import load_dotenv
@@ -70,6 +70,8 @@ SUPPORTED_AUDIO_TYPES = {
     'audio/x-aac',       # alternative aac
 }
 
+# Maximum number of messages to keep in conversation history
+MAX_HISTORY_LENGTH = 10
 
 async def transcribe_audio(audio_data):
     """
@@ -139,12 +141,16 @@ async def start(update, context):
     """
     Handle the /start command.
     """
+    # Initialize conversation history
+    context.user_data['history'] = []
+    
     welcome_message = (
-        "Hello! I can transcribe audio files for you.\n\n"
-        "Supported formats:\n"
-        "- Voice messages\n"
-        "- Audio files (.mp3, .wav, .ogg, .m4a, .aac, etc.)\n\n"
-        "Just send me any audio file and I'll transcribe it for you!"
+        "Hello! I'm your AI assistant powered by Gemini.\n\n"
+        "I can:\n"
+        "- Chat with you via text messages\n"
+        "- Transcribe and respond to voice messages\n"
+        "- Process audio files (.mp3, .wav, .ogg, .m4a, .aac, etc.)\n\n"
+        "Just send me a message or audio file and I'll respond!"
     )
     await update.message.reply_text(welcome_message)
 
@@ -157,44 +163,32 @@ async def download_file(file):
         async with session.get(file_obj.file_path) as response:
             return await response.read()
 
-async def send_transcript(update, transcript):
+async def send_response(update, response_text):
     """
-    Send transcript either as a message or file depending on length.
+    Send response either as a message or file depending on length.
     Max Telegram message length is 4096 characters.
     """
     # Handle both direct messages and callback queries
     message = update.message if update.message else update.callback_query.message
     
-    # If transcript is short enough, send as regular message
-    if len(transcript) <= 4096:
-        # Escape special characters for MarkdownV2
-        escaped_transcript = transcript.replace('.', '\\.').replace('-', '\\-').replace('!', '\\!').replace('(', '\\(').replace(')', '\\)')
-        
-        await message.reply_text(
-            escaped_transcript,
-            parse_mode='MarkdownV2'
-        )
+    # If response is short enough, send as regular message
+    if len(response_text) <= 4096:
+        await message.reply_text(response_text)
         return
         
     # Otherwise, send as file
     import tempfile
     
-    # Get original filename from stored user data
-    if hasattr(message, 'voice'):
-        original_filename = f"voice_message_{message.date.strftime('%Y%m%d_%H%M%S')}"
-    else:
-        original_filename = os.path.splitext(message.audio.file_name)[0] if hasattr(message, 'audio') else "transcript"
-    
     # Create temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as temp_file:
-        temp_file.write(transcript)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
+        temp_file.write(response_text)
         temp_file_path = temp_file.name
     
     try:
         await message.reply_document(
             document=open(temp_file_path, 'rb'),
-            filename=f"{original_filename}.md",
-            caption="Here's your transcript as a markdown file."
+            filename="response.txt",
+            caption="Here's my response as a text file (it was too long for a message)."
         )
     finally:
         # Clean up temporary file
@@ -235,8 +229,28 @@ async def handle_audio(update, context):
             # Delete the processing message
             await processing_msg.delete()
             
-            # Send transcript using the new function
-            await send_transcript(update, transcript)
+            # Initialize conversation history if it doesn't exist
+            if 'history' not in context.user_data:
+                context.user_data['history'] = []
+                
+            # Add user message to history
+            context.user_data['history'].append({"role": "user", "parts": [transcript]})
+            
+            # Trim history if it's too long
+            if len(context.user_data['history']) > MAX_HISTORY_LENGTH:
+                context.user_data['history'] = context.user_data['history'][-MAX_HISTORY_LENGTH:]
+            
+            # Get response from Gemini
+            with model_context() as current_model:
+                chat = current_model.start_chat(history=context.user_data['history'])
+                response = chat.send_message(transcript)
+                response_text = response.text
+                
+            # Add assistant response to history
+            context.user_data['history'].append({"role": "model", "parts": [response_text]})
+            
+            # Send response
+            await send_response(update, response_text)
             
         except Exception as e:
             logger.error(f"Error processing audio: {str(e)}", exc_info=True)
@@ -253,6 +267,45 @@ async def handle_audio(update, context):
             f"Sorry, there was an error processing your audio file. Error: {str(e)}"
         )
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle incoming text messages and maintain conversation with Gemini.
+    """
+    try:
+        user_message = update.message.text
+        
+        # Initialize conversation history if it doesn't exist
+        if 'history' not in context.user_data:
+            context.user_data['history'] = []
+        
+        # Add user message to history
+        context.user_data['history'].append({"role": "user", "parts": [user_message]})
+        
+        # Trim history if it's too long
+        if len(context.user_data['history']) > MAX_HISTORY_LENGTH:
+            context.user_data['history'] = context.user_data['history'][-MAX_HISTORY_LENGTH:]
+        
+        # Send typing action
+        await update.message.chat.send_action(action="typing")
+        
+        # Get response from Gemini
+        with model_context() as current_model:
+            chat = current_model.start_chat(history=context.user_data['history'])
+            response = chat.send_message(user_message)
+            response_text = response.text
+        
+        # Add assistant response to history
+        context.user_data['history'].append({"role": "model", "parts": [response_text]})
+        
+        # Send response
+        await send_response(update, response_text)
+        
+    except Exception as e:
+        logger.error(f"Error handling text message: {str(e)}", exc_info=True)
+        await update.message.reply_text(
+            f"Sorry, there was an error processing your message. Error: {str(e)}"
+        )
+
 def main():
     """Run the bot."""
     try:
@@ -264,6 +317,10 @@ def main():
         application.add_handler(MessageHandler(
             filters.VOICE | filters.AUDIO, 
             handle_audio
+        ))
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            handle_text
         ))
         
         # Run the bot
