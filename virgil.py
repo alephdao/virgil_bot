@@ -1,25 +1,31 @@
 import os
-from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
+import telebot
+from collections import defaultdict
+from datetime import datetime, timedelta
 import google.generativeai as genai
-import aiohttp
-from dotenv import load_dotenv
-import logging
-from telegram import Update
-import base64
+import boto3
+import tempfile
+from pydub import AudioSegment
 import gc
 from contextlib import contextmanager
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import logging
+import base64
+import aiohttp
+import requests
+from dotenv import load_dotenv
 
-
+load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GOOGLE_AI_API_KEY = os.getenv("GOOGLE_AI_API_KEY")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 if not BOT_TOKEN or not GOOGLE_AI_API_KEY:
     raise ValueError("Missing required credentials in environment variables")
@@ -27,310 +33,258 @@ if not BOT_TOKEN or not GOOGLE_AI_API_KEY:
 # Initialize Gemini
 genai.configure(api_key=GOOGLE_AI_API_KEY)
 
+# Initialize AWS Polly client
+polly = boto3.client('polly', 
+                    region_name=AWS_REGION,
+                    aws_access_key_id=AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+# Initialize Telegram bot
+bot = telebot.TeleBot(BOT_TOKEN)
+
 # Add a context manager for model handling
 @contextmanager
 def model_context():
     """
-    Context manager to handle model initialization and cleanup with safety settings
+    Context manager to handle model initialization and cleanup
     """
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash-exp', 
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                # These categories are defined in HarmCategory. The Gemini models only support HARM_CATEGORY_HARASSMENT, HARM_CATEGORY_HATE_SPEECH, HARM_CATEGORY_SEXUALLY_EXPLICIT, HARM_CATEGORY_DANGEROUS_CONTENT, 
-            }
-        )
+        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
         yield model
     finally:
         # Cleanup
         del model
         gc.collect()
 
-# Update the prompt to be more specific
-TRANSCRIPTION_PROMPT = """Transcribe this audio accurately in its original language.
-
-If there are multiple speakers, identify and label them as 'Speaker 1:', 'Speaker 2:', etc.
-
-Do not include any headers, titles, or additional text - only the transcription itself.
-
-When transcribing, add line breaks between different paragraphs or distinct segments of speech to improve readability."""
-
-# Supported audio MIME types
-SUPPORTED_AUDIO_TYPES = {
-    'audio/mpeg',        # .mp3
-    'audio/wav',         # .wav
-    'audio/ogg',         # .ogg
-    'audio/x-m4a',       # .m4a
-    'audio/mp4',         # .mp4 audio
-    'audio/x-wav',       # alternative wav
-    'audio/webm',        # .webm
-    'audio/aac',         # .aac
-    'audio/x-aac',       # alternative aac
-}
-
 # Maximum number of messages to keep in conversation history
 MAX_HISTORY_LENGTH = 10
 
-async def transcribe_audio(audio_data):
+# Add conversation history storage
+class ConversationManager:
+    def __init__(self, expiry_minutes=30):
+        self.conversations = defaultdict(list)
+        self.expiry_minutes = expiry_minutes
+        
+    def add_message(self, user_id, role, content):
+        # Clean expired conversations first
+        self._clean_expired()
+        
+        self.conversations[user_id].append({
+            'role': role,
+            'content': content,
+            'timestamp': datetime.now()
+        })
+    
+    def get_history(self, user_id):
+        return [
+            {'role': msg['role'], 'parts': [msg['content']]}
+            for msg in self.conversations[user_id]
+        ]
+    
+    def _clean_expired(self):
+        current_time = datetime.now()
+        for user_id in list(self.conversations.keys()):
+            self.conversations[user_id] = [
+                msg for msg in self.conversations[user_id]
+                if current_time - msg['timestamp'] < timedelta(minutes=self.expiry_minutes)
+            ]
+    
+    def clear_history(self, user_id):
+        """
+        Clear conversation history for a specific user
+        """
+        if user_id in self.conversations:
+            del self.conversations[user_id]
+
+# Initialize conversation manager
+conversation_manager = ConversationManager()
+
+def synthesize_speech(text):
     """
-    Transcribe audio data using Gemini API with proper cleanup
+    Generate speech from text using Amazon Polly
+    Returns: Path to temporary audio file
     """
     try:
-        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        content_parts = [
-            {"text": TRANSCRIPTION_PROMPT},
-            {
-                "inline_data": {
-                    "mime_type": "audio/mp4",
-                    "data": audio_base64
-                }
-            }
-        ]
+        # Use neural engine with a British male voice
+        response = polly.synthesize_speech(
+            Text=text,
+            OutputFormat='mp3',
+            VoiceId='Arthur',  # British English male voice
+            Engine='neural',
+            LanguageCode='en-GB'
+        )
         
-        with model_context() as current_model:
-            response = current_model.generate_content(content_parts)
-            transcript = response.text
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_file:
+            # Read audio stream data
+            audio_data = response['AudioStream'].read()
+            logger.info(f"Received audio data length: {len(audio_data)} bytes")
             
-            # Log original transcript
-            logger.info("Original transcript from Gemini:")
-            logger.info("-" * 50)
-            logger.info(transcript)
-            logger.info("-" * 50)
-            
-            # Remove any variations of transcription headers
-            transcript = transcript.replace("# Transcription\n\n", "")
-            transcript = transcript.replace("Okay, here is the transcription:\n", "")
-            transcript = transcript.replace("Here's the transcription:\n", "")
-            transcript = transcript.strip()
-            
-            # Count actual speaker labels using a more precise pattern
-            speaker_labels = set()
-            for line in transcript.split('\n'):
-                if line.strip().startswith(('Speaker ', '**Speaker ')):
-                    for i in range(1, 10):
-                        if f"Speaker {i}:" in line or f"**Speaker {i}:**" in line:
-                            speaker_labels.add(i)
-            
-            # Log number of speakers detected
-            logger.info(f"Number of unique speakers detected: {len(speaker_labels)}")
-            logger.info(f"Speaker numbers found: {sorted(list(speaker_labels))}")
-            
-            # Only remove speaker labels if there's exactly one speaker
-            if len(speaker_labels) == 1:
-                transcript = transcript.replace("**Speaker 1:**", "")
-                transcript = transcript.replace("Speaker 1:", "")
-                transcript = transcript.strip()
-            
-            # Log cleaned transcript
-            logger.info("Cleaned transcript:")
-            logger.info("-" * 50)
-            logger.info(transcript)
-            logger.info("-" * 50)
-            
-            return transcript
-            
+            # Write to temporary file
+            temp_file.write(audio_data)
+            logger.info(f"Successfully created audio file at: {temp_file.name}")
+            return temp_file.name
+                
     except Exception as e:
-        logger.error(f"Error transcribing audio: {str(e)}")
+        logger.error(f"Error in speech synthesis: {str(e)}")
         raise
+
+def download_file(file_info):
+    """
+    Download a file from Telegram servers
+    """
+    try:
+        # Get the full file path from Telegram's API
+        file_path = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        
+        response = requests.get(file_path)
+        response.raise_for_status()  # Raise exception for bad status codes
+        return response.content
+    except Exception as e:
+        logger.error(f"Error downloading file: {str(e)}")
+        raise
+
+def generate_gemini_response(user_id, input_content, file=None):
+    """
+    Generate response from Gemini model with conversation history
+    """
+    try:
+        with model_context() as current_model:
+            # Get conversation history
+            history = conversation_manager.get_history(user_id)
+            
+            # Generate response
+            if file:
+                chat = current_model.start_chat(history=history)
+                response = chat.send_message([input_content, file])
+            else:
+                chat = current_model.start_chat(history=history)
+                response = chat.send_message(input_content)
+            
+            # Store interaction history
+            conversation_manager.add_message(user_id, 'user', input_content)
+            conversation_manager.add_message(user_id, 'model', response.text)
+            
+            return response.text
     finally:
         gc.collect()
 
-async def start(update, context):
+@bot.message_handler(commands=['start'])
+def start(message):
     """
-    Handle the /start command.
+    Handle the /start command
     """
-    # Initialize conversation history
-    context.user_data['history'] = []
+    # Clear any existing history
+    conversation_manager.clear_history(message.from_user.id)
     
     welcome_message = (
         "Hello! I'm your AI assistant powered by Gemini.\n\n"
         "I can:\n"
         "- Chat with you via text messages\n"
-        "- Transcribe and respond to voice messages\n"
-        "- Process audio files (.mp3, .wav, .ogg, .m4a, .aac, etc.)\n\n"
+        "- Transcribe and respond to voice messages\n\n"
         "Just send me a message or audio file and I'll respond!"
     )
-    await update.message.reply_text(welcome_message)
+    bot.reply_to(message, welcome_message)
 
-async def download_file(file):
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
     """
-    Download a file from Telegram servers.
-    """
-    file_obj = await file.get_file()
-    async with aiohttp.ClientSession() as session:
-        async with session.get(file_obj.file_path) as response:
-            return await response.read()
-
-async def send_response(update, response_text):
-    """
-    Send response either as a message or file depending on length.
-    Max Telegram message length is 4096 characters.
-    """
-    # Handle both direct messages and callback queries
-    message = update.message if update.message else update.callback_query.message
-    
-    # If response is short enough, send as regular message
-    if len(response_text) <= 4096:
-        await message.reply_text(response_text)
-        return
-        
-    # Otherwise, send as file
-    import tempfile
-    
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
-        temp_file.write(response_text)
-        temp_file_path = temp_file.name
-    
-    try:
-        await message.reply_document(
-            document=open(temp_file_path, 'rb'),
-            filename="response.txt",
-            caption="Here's my response as a text file (it was too long for a message)."
-        )
-    finally:
-        # Clean up temporary file
-        os.unlink(temp_file_path)
-
-async def handle_audio(update, context):
-    """
-    Handle incoming audio files and voice messages.
+    Handle incoming text messages
     """
     try:
-        # Check if audio format is supported
-        if update.message.audio and update.message.audio.mime_type not in SUPPORTED_AUDIO_TYPES:
-            await update.message.reply_text(
-                f"Sorry, the format {update.message.audio.mime_type} is not supported. "
-                "Please send a common audio format like MP3, WAV, OGG, or M4A."
-            )
+        # Check if user wants to clear history
+        if message.text.lower() == "clear history":
+            conversation_manager.clear_history(message.from_user.id)
+            bot.reply_to(message, "Conversation history cleared! Let's start fresh.")
             return
-        
-        # Get the audio file
-        audio_file = update.message.voice or update.message.audio
-        file_type = "voice message" if update.message.voice else f"audio file ({update.message.audio.mime_type})"
-        
-        # Send processing message
-        processing_msg = await update.message.reply_text(
-            f"Processing your {file_type}... Please wait."
-        )
-        
-        try:
-            # Download and transcribe the audio
-            logger.info("Downloading audio file")
-            audio_data = await download_file(audio_file)
-            logger.info(f"Downloaded audio file, size: {len(audio_data)} bytes")
             
-            logger.info("Starting transcription")
-            transcript = await transcribe_audio(audio_data)
-            logger.info("Transcription completed")
-            
-            # Delete the processing message
-            await processing_msg.delete()
-            
-            # Initialize conversation history if it doesn't exist
-            if 'history' not in context.user_data:
-                context.user_data['history'] = []
-                
-            # Add user message to history
-            context.user_data['history'].append({"role": "user", "parts": [transcript]})
-            
-            # Trim history if it's too long
-            if len(context.user_data['history']) > MAX_HISTORY_LENGTH:
-                context.user_data['history'] = context.user_data['history'][-MAX_HISTORY_LENGTH:]
-            
-            # Get response from Gemini
-            with model_context() as current_model:
-                chat = current_model.start_chat(history=context.user_data['history'])
-                response = chat.send_message(transcript)
-                response_text = response.text
-                
-            # Add assistant response to history
-            context.user_data['history'].append({"role": "model", "parts": [response_text]})
-            
-            # Send response
-            await send_response(update, response_text)
-            
-        except Exception as e:
-            logger.error(f"Error processing audio: {str(e)}", exc_info=True)
-            error_message = (
-                "Sorry, there was an error processing your audio file.\n"
-                f"Error: {str(e)}\n\n"
-                "Note: telegram bots have a 20MB file limit. telegram API allows 2GB."
-            )
-            await processing_msg.edit_text(error_message)
-            
-    except Exception as e:
-        logger.error(f"Error handling audio file: {str(e)}")
-        await update.message.reply_text(
-            f"Sorry, there was an error processing your audio file. Error: {str(e)}"
-        )
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handle incoming text messages and maintain conversation with Gemini.
-    """
-    try:
-        user_message = update.message.text
-        
-        # Initialize conversation history if it doesn't exist
-        if 'history' not in context.user_data:
-            context.user_data['history'] = []
-        
-        # Add user message to history
-        context.user_data['history'].append({"role": "user", "parts": [user_message]})
-        
-        # Trim history if it's too long
-        if len(context.user_data['history']) > MAX_HISTORY_LENGTH:
-            context.user_data['history'] = context.user_data['history'][-MAX_HISTORY_LENGTH:]
-        
-        # Send typing action
-        await update.message.chat.send_action(action="typing")
-        
         # Get response from Gemini
-        with model_context() as current_model:
-            chat = current_model.start_chat(history=context.user_data['history'])
-            response = chat.send_message(user_message)
-            response_text = response.text
+        response_text = generate_gemini_response(
+            message.from_user.id,
+            message.text
+        )
         
-        # Add assistant response to history
-        context.user_data['history'].append({"role": "model", "parts": [response_text]})
+        # Send text response
+        bot.reply_to(message, response_text)
         
-        # Send response
-        await send_response(update, response_text)
+        # Generate and send audio response
+        logger.info("Generating speech from response text")
+        audio_file_path = synthesize_speech(response_text)
+        
+        # Send audio response
+        with open(audio_file_path, 'rb') as audio:
+            bot.send_voice(message.chat.id, audio)
+            
+        # Clean up temporary file
+        os.unlink(audio_file_path)
         
     except Exception as e:
         logger.error(f"Error handling text message: {str(e)}", exc_info=True)
-        await update.message.reply_text(
-            f"Sorry, there was an error processing your message. Error: {str(e)}"
-        )
+        bot.reply_to(message, f"Sorry, there was an error processing your message: {str(e)}")
 
-def main():
-    """Run the bot."""
+@bot.message_handler(content_types=['voice', 'audio'])
+def handle_audio(message):
+    """
+    Handle voice messages and audio files
+    """
     try:
-        # Create and run the application
-        application = Application.builder().token(BOT_TOKEN).build()
+        # Send processing message
+        processing_msg = bot.reply_to(message, "Processing your audio... Please wait.")
         
-        # Add handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(
-            filters.VOICE | filters.AUDIO, 
-            handle_audio
-        ))
-        application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND, 
-            handle_text
-        ))
+        # Get file info
+        if message.voice:
+            file_info = bot.get_file(message.voice.file_id)
+            mime_type = 'audio/ogg; codecs=opus'  # Telegram voice messages are always in OGG format
+        else:
+            file_info = bot.get_file(message.audio.file_id)
+            mime_type = getattr(message.audio, 'mime_type', 'audio/ogg')
         
-        # Run the bot
-        logger.info("Bot is running...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Download audio data
+        audio_data = download_file(file_info)
+        logger.info(f"Downloaded audio file, size: {len(audio_data)} bytes")
         
-    except KeyboardInterrupt:
-        logger.info("\nBot stopped gracefully")
+        # Create properly formatted Gemini content
+        gemini_file = {
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": base64.b64encode(audio_data).decode('utf-8')
+            }
+        }
+        
+        # Generate response
+        response_text = generate_gemini_response(
+            message.from_user.id,
+            "Audio message sent",
+            gemini_file
+        )
+        
+        # Delete processing message
+        bot.delete_message(message.chat.id, processing_msg.message_id)
+        
+        # Send text response
+        bot.reply_to(message, response_text)
+        
+        # Generate and send audio response
+        logger.info("Generating speech from response text")
+        audio_file_path = synthesize_speech(response_text)
+        
+        # Send audio response
+        with open(audio_file_path, 'rb') as audio:
+            bot.send_voice(message.chat.id, audio)
+            
+        # Clean up temporary file
+        os.unlink(audio_file_path)
+        
     except Exception as e:
-        logger.error(f"Error occurred: {e}")
+        logger.error(f"Error processing audio: {str(e)}", exc_info=True)
+        error_message = (
+            "Sorry, there was an error processing your audio file.\n"
+            f"Error: {str(e)}\n\n"
+            "Note: telegram bots have a 20MB file limit."
+        )
+        bot.reply_to(message, error_message)
 
-if __name__ == '__main__':
-    main()
+# Start the bot
+if __name__ == "__main__":
+    logger.info("Bot is running...")
+    bot.infinity_polling()
