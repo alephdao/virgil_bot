@@ -153,6 +153,260 @@ class ConversationManager:
 # Initialize conversation manager
 conversation_manager = ConversationManager()
 
+# Define the theology question tree
+THEOLOGY_TREE = {
+    "Q1": {
+        "question": "If you could prove or disprove God's existence, would you want to know?",
+        "yes": "A",
+        "no": "B",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "A": {
+        "question": "Can reason alone lead us to religious truth?",
+        "yes": "AA",
+        "no": "AB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "B": {
+        "question": "Is faith more about experience or tradition?",
+        "yes": "BA",  # Using "yes" for "Experience"
+        "no": "BB",   # Using "no" for "Tradition"
+        "yes_label": "Experience",
+        "no_label": "Tradition"
+    },
+    "AA": {
+        "question": "Must the divine be personal to be meaningful?",
+        "yes": "AAA",
+        "no": "AAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AB": {
+        "question": "Can multiple religions all be true?",
+        "yes": "ABA",
+        "no": "ABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BA": {
+        "question": "Should religious truth adapt to modern knowledge?",
+        "yes": "BAA",
+        "no": "BAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BB": {
+        "question": "Is divine revelation necessary for moral knowledge?",
+        "yes": "BBA",
+        "no": "BBB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AAA": {
+        "question": "Does evil disprove a perfect God?",
+        "yes": "AAAA",
+        "no": "AAAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AAB": {
+        "question": "Is the universe itself divine?",
+        "yes": "AABA",
+        "no": "AABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "ABA": {
+        "question": "Does genuine free will exist?",
+        "yes": "ABAA",
+        "no": "ABAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "ABB": {
+        "question": "Is religion more about transformation or truth?",
+        "yes": "ABBA",  # Using "yes" for "Truth"
+        "no": "ABBB",   # Using "no" for "Transform"
+        "yes_label": "Truth",
+        "no_label": "Transform"
+    },
+    "BAA": {
+        "question": "Can sacred texts contain errors?",
+        "yes": "BAAA",
+        "no": "BAAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BAB": {
+        "question": "Is mystical experience trustworthy?",
+        "yes": "BABA",
+        "no": "BABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BBA": {
+        "question": "Should faith seek understanding?",
+        "yes": "BBAA",
+        "no": "BBAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BBB": {
+        "question": "Does divine hiddenness matter?",
+        "yes": "BBBA",
+        "no": "BBBB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AAAA": {
+        "question": "Can finite minds grasp infinite truth?",
+        "yes": "AAAAA",
+        "no": "AAAAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AAAB": {
+        "question": "Is reality fundamentally good?",
+        "yes": "AAABA",
+        "no": "AAABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AABA": {
+        "question": "Does prayer change anything?",
+        "yes": "AABAA",
+        "no": "AABAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "AABB": {
+        "question": "Is consciousness evidence of divinity?",
+        "yes": "AABBA",
+        "no": "AABBB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "ABAA": {
+        "question": "Can miracles violate natural law?",
+        "yes": "ABAAA",
+        "no": "ABAAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "ABAB": {
+        "question": "Is there purpose in evolution?",
+        "yes": "ABABA",
+        "no": "ABABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "ABBA": {
+        "question": "Can symbols contain ultimate truth?",
+        "yes": "ABBAA",
+        "no": "ABBAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "ABBB": {
+        "question": "Is divine grace necessary for virtue?",
+        "yes": "ABBBA",
+        "no": "ABBBB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BAAA": {
+        "question": "Should tradition limit interpretation?",
+        "yes": "BAAAA",
+        "no": "BAAAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BAAB": {
+        "question": "Can ritual create real change?",
+        "yes": "BAABA",
+        "no": "BAABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BABA": {
+        "question": "Is doubt part of authentic faith?",
+        "yes": "BABAA",
+        "no": "BABAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BABB": {
+        "question": "Must religion be communal?",
+        "yes": "BABBA",
+        "no": "BABBB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BBAA": {
+        "question": "Can God's nature be known?",
+        "yes": "BBAAA",
+        "no": "BBAAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BBAB": {
+        "question": "Is suffering meaningful?",
+        "yes": "BBABA",
+        "no": "BBABB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BBBA": {
+        "question": "Is love the ultimate reality?",
+        "yes": "BBBAA",
+        "no": "BBBAB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    "BBBB": {
+        "question": "Does immortality give life meaning?",
+        "yes": "BBBBA",
+        "no": "BBBBB",
+        "yes_label": "Yes",
+        "no_label": "No"
+    },
+    # Leaf nodes (final questions)
+    "AAAAA": {"question": "Final question AAAAA"},
+    "AAAAB": {"question": "Final question AAAAB"},
+    "AAABA": {"question": "Final question AAABA"},
+    "AAABB": {"question": "Final question AAABB"},
+    "AABAA": {"question": "Final question AABAA"},
+    "AABAB": {"question": "Final question AABAB"},
+    "AABBA": {"question": "Final question AABBA"},
+    "AABBB": {"question": "Final question AABBB"},
+    "ABAAA": {"question": "Final question ABAAA"},
+    "ABAAB": {"question": "Final question ABAAB"},
+    "ABABA": {"question": "Final question ABABA"},
+    "ABABB": {"question": "Final question ABABB"},
+    "ABBAA": {"question": "Final question ABBAA"},
+    "ABBAB": {"question": "Final question ABBAB"},
+    "ABBBA": {"question": "Final question ABBBA"},
+    "ABBBB": {"question": "Final question ABBBB"},
+    "BAAAA": {"question": "Final question BAAAA"},
+    "BAAAB": {"question": "Final question BAAAB"},
+    "BAABA": {"question": "Final question BAABA"},
+    "BAABB": {"question": "Final question BAABB"},
+    "BABAA": {"question": "Final question BABAA"},
+    "BABAB": {"question": "Final question BABAB"},
+    "BABBA": {"question": "Final question BABBA"},
+    "BABBB": {"question": "Final question BABBB"},
+    "BBAAA": {"question": "Final question BBAAA"},
+    "BBAAB": {"question": "Final question BBAAB"},
+    "BBABA": {"question": "Final question BBABA"},
+    "BBABB": {"question": "Final question BBABB"},
+    "BBBAA": {"question": "Final question BBBAA"},
+    "BBBAB": {"question": "Final question BBBAB"},
+    "BBBBA": {"question": "Final question BBBBA"},
+    "BBBBB": {"question": "Final question BBBBB"}
+}
+
 def synthesize_speech(text):
     """
     Generate speech from text using Amazon Polly
@@ -311,43 +565,124 @@ def start(message):
 @bot.message_handler(commands=['discuss'])
 def discuss(message):
     """
-    Handle the /discuss command - clear history, present the philosophical question,
-    and add a button to discuss with Virgil
+    Handle the /discuss command - clear history, present the first question in the theology tree,
+    and add Yes/No options along with a "Discuss with Virgil" button
     """
     # Clear any existing history
     conversation_manager.clear_history(message.from_user.id)
     
-    # The philosophical question
-    philosophical_question = "Can reason alone lead us to religious truth?"
+    # Get the first question from the theology tree
+    question_id = "Q1"
+    question_text = THEOLOGY_TREE[question_id]["question"]
     
-    # Create inline keyboard with a single button
-    markup = telebot.types.InlineKeyboardMarkup()
+    # Create inline keyboard with Yes/No options and Discuss button
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    
+    # Add Yes/No buttons with custom labels if available
+    yes_label = THEOLOGY_TREE[question_id].get("yes_label", "Yes")
+    no_label = THEOLOGY_TREE[question_id].get("no_label", "No")
+    
+    yes_button = telebot.types.InlineKeyboardButton(
+        text=yes_label, 
+        callback_data=f"theology_yes_{question_id}"
+    )
+    no_button = telebot.types.InlineKeyboardButton(
+        text=no_label, 
+        callback_data=f"theology_no_{question_id}"
+    )
+    markup.add(yes_button, no_button)
+    
+    # Add Discuss with Virgil button
     discuss_button = telebot.types.InlineKeyboardButton(
         text="Discuss with Virgil", 
-        callback_data="discuss_with_virgil"
+        callback_data=f"discuss_with_virgil_{question_id}"
     )
     markup.add(discuss_button)
     
-    # Send the question with the button
+    # Send the question with the buttons
     bot.send_message(
         message.chat.id,
-        philosophical_question,
+        question_text,
         reply_markup=markup
     )
 
-@bot.callback_query_handler(func=lambda call: call.data == "discuss_with_virgil")
-def handle_discuss_callback(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("theology_yes_") or call.data.startswith("theology_no_"))
+def handle_theology_navigation(call):
     """
-    Handle the "Discuss with Virgil" button click
+    Handle Yes/No button clicks to navigate through the theology question tree
     """
     try:
-        # Get the philosophical question
-        philosophical_question = "Can reason alone lead us to religious truth?"
+        # Parse the callback data to get the current question ID and the user's choice
+        parts = call.data.split("_")
+        choice = parts[1]  # "yes" or "no"
+        current_question_id = parts[2]  # Current question ID
+        
+        # Get the next question ID based on the user's choice
+        next_question_id = THEOLOGY_TREE[current_question_id][choice]
+        
+        # Get the next question text
+        next_question_text = THEOLOGY_TREE[next_question_id]["question"]
+        
+        # Check if this is a leaf node (no yes/no options)
+        is_leaf_node = "yes" not in THEOLOGY_TREE[next_question_id] and "no" not in THEOLOGY_TREE[next_question_id]
+        
+        # Create inline keyboard
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        
+        if not is_leaf_node:
+            # Add Yes/No buttons for non-leaf nodes with custom labels if available
+            yes_label = THEOLOGY_TREE[next_question_id].get("yes_label", "Yes")
+            no_label = THEOLOGY_TREE[next_question_id].get("no_label", "No")
+            
+            yes_button = telebot.types.InlineKeyboardButton(
+                text=yes_label, 
+                callback_data=f"theology_yes_{next_question_id}"
+            )
+            no_button = telebot.types.InlineKeyboardButton(
+                text=no_label, 
+                callback_data=f"theology_no_{next_question_id}"
+            )
+            markup.add(yes_button, no_button)
+        
+        # Always add Discuss with Virgil button
+        discuss_button = telebot.types.InlineKeyboardButton(
+            text="Discuss with Virgil", 
+            callback_data=f"discuss_with_virgil_{next_question_id}"
+        )
+        markup.add(discuss_button)
+        
+        # Edit the original message to show the new question and buttons
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=next_question_text,
+            reply_markup=markup
+        )
+        
+        # Answer the callback to remove loading state
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Error handling theology navigation: {str(e)}", exc_info=True)
+        bot.answer_callback_query(call.id, f"Error: {str(e)}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("discuss_with_virgil_"))
+def handle_discuss_callback(call):
+    """
+    Handle the "Discuss with Virgil" button click for any question in the theology tree
+    """
+    try:
+        # Parse the callback data to get the question ID
+        parts = call.data.split("_")
+        question_id = parts[-1]  # Last part is the question ID
+        
+        # Get the question text
+        question_text = THEOLOGY_TREE[question_id]["question"]
         
         # Generate response from Virgil
         response_text = generate_gemini_response(
             call.from_user.id,
-            philosophical_question
+            question_text
         )
         
         # Send text response

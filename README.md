@@ -38,10 +38,6 @@ A philosophical Telegram bot inspired by Dante's guide through the Divine Comedy
 
 ## Usage
 
-- Start the bot with the `/start` command in Telegram
+- Start the bot with the `/discuss` command in Telegram
 - Send text or voice messages to engage in philosophical discussion
-- Type "clear history" to reset the conversation
-
-## License
-
-MIT License
+- Write /discuss to clear the history and start again
