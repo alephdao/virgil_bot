@@ -41,11 +41,11 @@ polly = boto3.client('polly',
 # Initialize Telegram bot
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Define Virgil's personality as a system prompt
-VIRGIL_SYSTEM_PROMPT = """
+# Define Virgil's personality as a system prompt template
+VIRGIL_SYSTEM_PROMPT_TEMPLATE = """
 You are Virgil, an AI assistant designed to guide users through philosophical discussions. Your primary task is to explore the following philosophical question:
 
-"Can reason alone lead us to religious truth?"
+"{current_question}"
 
 When interacting with users, adhere to these guidelines:
 
@@ -78,8 +78,38 @@ Before responding, Follow these steps:
 7. If over 600 characters, revise and shorten
 8. Ensure the response adheres to the 2-3 sentence guideline
 9. Verify the final character count is 600 or less
-
 """
+
+# Function to generate a dynamic system prompt based on the question path
+def generate_dynamic_system_prompt(question_id, question_path=None):
+    """
+    Generate a dynamic system prompt based on the current question and the path taken to reach it
+    
+    Args:
+        question_id: The ID of the current question
+        question_path: Optional list of tuples (question_id, answer) representing the path taken
+    
+    Returns:
+        A customized system prompt
+    """
+    current_question = THEOLOGY_TREE[question_id]["question"]
+    logger.info(f"Generating dynamic prompt for question ID: {question_id}, question text: '{current_question}'")
+    
+    # Format the template with the current question
+    dynamic_prompt = VIRGIL_SYSTEM_PROMPT_TEMPLATE.format(current_question=current_question)
+    
+    # Add the question path history if available
+    if question_path and len(question_path) > 0:
+        dynamic_prompt += "\n\nThe user has answered previous questions as follows:\n"
+        
+        for prev_q_id, answer in question_path:
+            prev_question = THEOLOGY_TREE[prev_q_id]["question"]
+            dynamic_prompt += f"- Question: \"{prev_question}\"\n  Answer: {answer}\n"
+    
+    # Log the first 100 characters of the prompt for debugging
+    logger.info(f"Dynamic prompt first 100 chars: {dynamic_prompt[:100]}")
+    
+    return dynamic_prompt
 
 # Define generation config
 generation_config = {
@@ -123,17 +153,31 @@ class ConversationManager:
             'content': content,
             'timestamp': datetime.now()
         })
+        
+        # Log the message being added for debugging
+        if role == 'model' and len(content) > 100:
+            logger.info(f"Adding model message to history, first 100 chars: {content[:100]}")
+        else:
+            logger.info(f"Adding {role} message to history: {content}")
     
     def get_history(self, user_id):
-        # If this is a new conversation, add the system prompt
+        # If this is a new conversation, generate a default dynamic prompt for Q1
         if not self.conversations[user_id]:
-            return [{'role': 'model', 'parts': [VIRGIL_SYSTEM_PROMPT]}]
+            logger.info("No conversation history found, generating default dynamic prompt for Q1")
+            default_prompt = generate_dynamic_system_prompt("Q1")
+            return [{'role': 'model', 'parts': [default_prompt]}]
         
         # For existing conversations, return the history
-        return [
+        history = [
             {'role': msg['role'], 'parts': [msg['content']]}
             for msg in self.conversations[user_id]
         ]
+        
+        # Log the first message in history for debugging
+        if history and history[0]['role'] == 'model':
+            logger.info(f"First message in history (first 100 chars): {history[0]['parts'][0][:100]}")
+        
+        return history
     
     def _clean_expired(self):
         current_time = datetime.now()
@@ -148,6 +192,7 @@ class ConversationManager:
         Clear conversation history for a specific user
         """
         if user_id in self.conversations:
+            logger.info(f"Clearing conversation history for user {user_id}")
             del self.conversations[user_id]
 
 # Initialize conversation manager
@@ -498,7 +543,7 @@ def shorten_text(text):
     finally:
         gc.collect()
 
-def generate_gemini_response(user_id, input_content, file=None):
+def generate_gemini_response(user_id, input_content, file=None, custom_system_prompt=None):
     """
     Generate response from Gemini model with conversation history and Virgil personality
     
@@ -506,11 +551,16 @@ def generate_gemini_response(user_id, input_content, file=None):
         user_id: User identifier for conversation history
         input_content: User's message content
         file: Optional file attachment
+        custom_system_prompt: Optional custom system prompt to use instead of the default
     """
     try:
         with model_context() as current_model:
-            # Get conversation history with system prompt
+            # Get conversation history
             history = conversation_manager.get_history(user_id)
+            
+            # If a custom system prompt is provided, replace the first message in history
+            if custom_system_prompt and history and history[0]['role'] == 'model':
+                history[0]['parts'] = [custom_system_prompt]
             
             # Generate initial response
             if file:
@@ -543,6 +593,32 @@ def generate_gemini_response(user_id, input_content, file=None):
     finally:
         gc.collect()
 
+# Add this helper function after the ConversationManager class
+def get_current_question_id(user_id):
+    """
+    Helper function to get the current question ID for a user
+    
+    Args:
+        user_id: The user's ID
+        
+    Returns:
+        The current question ID (defaults to "Q1" if not found)
+    """
+    if not hasattr(bot, 'session_data') or user_id not in bot.session_data:
+        return "Q1"
+    
+    # First check if current_question_id is explicitly set
+    if 'current_question_id' in bot.session_data[user_id]:
+        return bot.session_data[user_id]['current_question_id']
+    
+    # Fall back to the last question in the path
+    question_path = bot.session_data[user_id].get('question_path', [])
+    if question_path:
+        return question_path[-1][0]
+    
+    # Default to Q1 if no path exists
+    return "Q1"
+
 @bot.message_handler(commands=['start'])
 def start(message):
     """
@@ -550,6 +626,11 @@ def start(message):
     """
     # Clear any existing history
     conversation_manager.clear_history(message.from_user.id)
+    
+    # Initialize session data
+    if not hasattr(bot, 'session_data'):
+        bot.session_data = {}
+    bot.session_data[message.from_user.id] = {'question_path': []}
     
     welcome_message = (
         "Greetings, I am Virgil, your intellectual companion on a journey of discovery and growth.\n\n"
@@ -570,6 +651,11 @@ def discuss(message):
     """
     # Clear any existing history
     conversation_manager.clear_history(message.from_user.id)
+    
+    # Initialize or reset the session data for this user
+    if not hasattr(bot, 'session_data'):
+        bot.session_data = {}
+    bot.session_data[message.from_user.id] = {'question_path': []}
     
     # Get the first question from the theology tree
     question_id = "Q1"
@@ -606,6 +692,69 @@ def discuss(message):
         reply_markup=markup
     )
 
+@bot.message_handler(commands=['debug'])
+def debug(message):
+    """
+    Handle the /debug command - show the current question and path
+    """
+    try:
+        user_id = message.from_user.id
+        
+        # Check if user has session data
+        if hasattr(bot, 'session_data') and user_id in bot.session_data:
+            # Get the current question ID using the helper function
+            current_question_id = get_current_question_id(user_id)
+            question_path = bot.session_data[user_id].get('question_path', [])
+            
+            # Get the current question text
+            current_question = THEOLOGY_TREE[current_question_id]["question"]
+            
+            # Format the question path
+            path_info = "Question path:\n"
+            for q_id, answer in question_path:
+                q_text = THEOLOGY_TREE[q_id]["question"]
+                path_info += f"- Q: \"{q_text}\"\n  A: {answer}\n"
+            
+            # Get the first message from conversation history if available
+            system_prompt_preview = ""
+            if user_id in conversation_manager.conversations and conversation_manager.conversations[user_id]:
+                first_msg = conversation_manager.conversations[user_id][0]
+                if first_msg['role'] == 'model':
+                    system_prompt_preview = f"\n\nSystem prompt (first 200 chars):\n{first_msg['content'][:200]}..."
+            
+            # Send debug info
+            debug_info = f"Current question ID: {current_question_id}\nCurrent question: \"{current_question}\"\n\n{path_info}{system_prompt_preview}"
+            bot.send_message(message.chat.id, debug_info)
+        else:
+            bot.send_message(message.chat.id, "No session data found. Please start a discussion with /discuss first.")
+    except Exception as e:
+        logger.error(f"Error in debug command: {str(e)}", exc_info=True)
+        bot.send_message(message.chat.id, f"Error retrieving debug information: {str(e)}")
+
+@bot.message_handler(commands=['quote'])
+def quote_current_question(message):
+    """
+    Handle the /quote command - show the current question from the theology tree
+    """
+    try:
+        user_id = message.from_user.id
+        
+        # Check if user has session data
+        if hasattr(bot, 'session_data') and user_id in bot.session_data:
+            # Get the current question ID using the helper function
+            current_question_id = get_current_question_id(user_id)
+            
+            # Get the current question text
+            current_question = THEOLOGY_TREE[current_question_id]["question"]
+            
+            # Send just the current question
+            bot.send_message(message.chat.id, f"\"{current_question}\"")
+        else:
+            bot.send_message(message.chat.id, "No active discussion found. Please start a discussion with /discuss first.")
+    except Exception as e:
+        logger.error(f"Error in quote command: {str(e)}", exc_info=True)
+        bot.send_message(message.chat.id, f"Error retrieving current question: {str(e)}")
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("theology_yes_") or call.data.startswith("theology_no_"))
 def handle_theology_navigation(call):
     """
@@ -619,6 +768,21 @@ def handle_theology_navigation(call):
         
         # Get the next question ID based on the user's choice
         next_question_id = THEOLOGY_TREE[current_question_id][choice]
+        
+        # Store the user's choice in the session data
+        user_id = call.from_user.id
+        if not hasattr(bot, 'session_data'):
+            bot.session_data = {}
+        if user_id not in bot.session_data:
+            bot.session_data[user_id] = {'question_path': []}
+        
+        # Add the current question and answer to the path
+        answer_label = THEOLOGY_TREE[current_question_id][f"{choice}_label"]
+        bot.session_data[user_id]['question_path'].append((current_question_id, answer_label))
+        
+        # IMPORTANT: Store the next question ID as the current question
+        bot.session_data[user_id]['current_question_id'] = next_question_id
+        logger.info(f"Updated current question ID to {next_question_id} for user {user_id}")
         
         # Get the next question text
         next_question_text = THEOLOGY_TREE[next_question_id]["question"]
@@ -679,10 +843,30 @@ def handle_discuss_callback(call):
         # Get the question text
         question_text = THEOLOGY_TREE[question_id]["question"]
         
-        # Generate response from Virgil
+        # Get the question path if available
+        user_id = call.from_user.id
+        question_path = []
+        if hasattr(bot, 'session_data') and user_id in bot.session_data:
+            question_path = bot.session_data[user_id].get('question_path', [])
+            
+            # Update the current_question_id in session data
+            bot.session_data[user_id]['current_question_id'] = question_id
+            logger.info(f"Updated current question ID to {question_id} for user {user_id} via discuss button")
+        
+        # Clear any existing conversation history
+        conversation_manager.clear_history(user_id)
+        
+        # Generate a dynamic system prompt based on the current question and path
+        dynamic_system_prompt = generate_dynamic_system_prompt(question_id, question_path)
+        
+        # Log the dynamic system prompt for debugging
+        logger.info(f"Generated dynamic system prompt for question {question_id}")
+        
+        # Generate response from Virgil using the dynamic system prompt
         response_text = generate_gemini_response(
-            call.from_user.id,
-            question_text
+            user_id,
+            question_text,
+            custom_system_prompt=dynamic_system_prompt
         )
         
         # Send text response
@@ -716,15 +900,40 @@ def handle_text(message):
     Handle incoming text messages
     """
     try:
+        # Skip processing if this is a command (starts with /)
+        if message.text.startswith('/'):
+            logger.info(f"Skipping text handler for command: {message.text}")
+            return
+            
         # Check if user wants to clear history
         if message.text.lower() == "clear history":
             conversation_manager.clear_history(message.from_user.id)
+            # Also reset session data
+            if hasattr(bot, 'session_data'):
+                bot.session_data[message.from_user.id] = {'question_path': []}
             bot.reply_to(message, "Our conversation history has been cleared. Let us begin anew on our intellectual journey.")
             return
-            
+        
+        user_id = message.from_user.id
+        
+        # Get the current question ID using the helper function
+        current_question_id = get_current_question_id(user_id)
+        
+        # Generate a dynamic system prompt based on the current question and path
+        question_path = []
+        if hasattr(bot, 'session_data') and user_id in bot.session_data:
+            question_path = bot.session_data[user_id].get('question_path', [])
+        
+        # Check if we need to update the system prompt
+        if not conversation_manager.conversations[user_id]:
+            # If no conversation history, generate a new dynamic prompt
+            dynamic_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
+            conversation_manager.add_message(user_id, 'model', dynamic_system_prompt)
+            logger.info(f"Added dynamic system prompt for question {current_question_id}")
+        
         # Get response from Gemini with Virgil personality
         response_text = generate_gemini_response(
-            message.from_user.id,
+            user_id,
             message.text
         )
         
@@ -775,9 +984,26 @@ def handle_audio(message):
             }
         }
         
+        user_id = message.from_user.id
+        
+        # Get the current question ID using the helper function
+        current_question_id = get_current_question_id(user_id)
+        
+        # Generate a dynamic system prompt based on the current question and path
+        question_path = []
+        if hasattr(bot, 'session_data') and user_id in bot.session_data:
+            question_path = bot.session_data[user_id].get('question_path', [])
+        
+        # Check if we need to update the system prompt
+        if not conversation_manager.conversations[user_id]:
+            # If no conversation history, generate a new dynamic prompt
+            dynamic_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
+            conversation_manager.add_message(user_id, 'model', dynamic_system_prompt)
+            logger.info(f"Added dynamic system prompt for question {current_question_id}")
+        
         # Generate response
         response_text = generate_gemini_response(
-            message.from_user.id,
+            user_id,
             "Audio message sent",
             gemini_file
         )
