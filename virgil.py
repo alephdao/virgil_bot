@@ -43,41 +43,31 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Define Virgil's personality as a system prompt template
 VIRGIL_SYSTEM_PROMPT_TEMPLATE = """
-You are Virgil, an AI assistant designed to guide users through philosophical discussions. Your primary task is to explore the following philosophical question:
+You are Virgil, an AI assistant designed to guide users through philosophical discussions. 
+
+Your ONLY TASK is to help the user decide how to answer the following yes or no question:
 
 "{current_question}"
 
 When interacting with users, adhere to these guidelines:
 
-1. Style: Be precise, warm, intellectually rigorous, occasionally playful, humble, and accessible. Bridge ancient wisdom with contemporary relevance.
+1. Style: Be precise, warm, intellectually rigorous, occasionally playful, humble, and accessible.
 
 - **Precise**: Uses language with accuracy and nuance
 - **Warm**: Conveys genuine interest in the user's development
 - **Intellectually Rigorous**: Maintains high standards of thinking
 - **Occasionally Playful**: Uses appropriate humor to build rapport
 - **Humble**: Acknowledges the limits of its understanding
-- **Classical but Accessible**: Bridges ancient wisdom with contemporary relevance
+- **Classical but Accessible**
 
 2. Response Format:
    - Use 2-5 short, complete sentences only
    - Avoid bullet points and numbered lists
    - Prioritize brevity over comprehensiveness
    - NEVER exceed 600 characters total
-   - End with a single, focused follow-up question
 
-3. User Interaction: For all other inputs, respond accordingly while maintaining the response format
+3. Analyse the users prior responses to help recommend how to answer "{current_question}"
 
-Before responding, Follow these steps:
-
-1. Analyze the philosophical question and user message
-2. Brainstorm key points to address
-3. Draft an initial response
-4. Refine for brevity and clarity
-5. Craft a follow-up question
-6. Check the character count
-7. If over 600 characters, revise and shorten
-8. Ensure the response adheres to the 2-3 sentence guideline
-9. Verify the final character count is 600 or less
 """
 
 # Function to generate a dynamic system prompt based on the question path
@@ -508,10 +498,10 @@ def shorten_text(text):
         
         # Create a new prompt for shortening
         shorten_prompt = f"""
-        Please shorten the following text to be under 800 characters total while:
+        Please shorten the following text to be under 1000 characters total while:
         1. Maintaining the key message
         2. Preserving the philosophical tone
-        3. Keeping the follow-up question at the end
+        3. Keeping the follow-up question at the end, if there is one.
         
         Here's the text to shorten:
         {text}
@@ -521,12 +511,12 @@ def shorten_text(text):
         shortened_response = model.generate_content(shorten_prompt)
         
         # If somehow the shortened response is still over 600 characters, truncate
-        if len(shortened_response.text) > 800:
+        if len(shortened_response.text) > 1000:
             # Find the last sentence end before 550 characters to leave room for a question
-            last_end = shortened_response.text[:750].rfind('.')
+            last_end = shortened_response.text[:950].rfind('.')
             if last_end == -1:
                 # No sentence end found, just truncate
-                shortened_text = shortened_response.text[:750] + "... What are your thoughts on this?"
+                shortened_text = shortened_response.text[:950] + "... What are your thoughts on this?"
             else:
                 # Add a follow-up question if there isn't one
                 shortened_text = shortened_response.text[:last_end+1]
@@ -558,9 +548,17 @@ def generate_gemini_response(user_id, input_content, file=None, custom_system_pr
             # Get conversation history
             history = conversation_manager.get_history(user_id)
             
+            # If no custom system prompt is provided, generate one based on current question
+            if not custom_system_prompt and hasattr(bot, 'session_data') and user_id in bot.session_data:
+                current_question_id = get_current_question_id(user_id)
+                question_path = bot.session_data[user_id].get('question_path', [])
+                custom_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
+                logger.info(f"Generated dynamic system prompt for response based on question {current_question_id}")
+            
             # If a custom system prompt is provided, replace the first message in history
             if custom_system_prompt and history and history[0]['role'] == 'model':
                 history[0]['parts'] = [custom_system_prompt]
+                logger.info("Updated system prompt in conversation history")
             
             # Generate initial response
             if file:
@@ -924,17 +922,24 @@ def handle_text(message):
         if hasattr(bot, 'session_data') and user_id in bot.session_data:
             question_path = bot.session_data[user_id].get('question_path', [])
         
-        # Check if we need to update the system prompt
-        if not conversation_manager.conversations[user_id]:
-            # If no conversation history, generate a new dynamic prompt
-            dynamic_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
-            conversation_manager.add_message(user_id, 'model', dynamic_system_prompt)
-            logger.info(f"Added dynamic system prompt for question {current_question_id}")
+        # Always regenerate the dynamic system prompt to ensure it's up to date
+        dynamic_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
         
-        # Get response from Gemini with Virgil personality
+        # Check if we need to update the system prompt in conversation history
+        if not conversation_manager.conversations[user_id]:
+            # If no conversation history, add the dynamic prompt
+            conversation_manager.add_message(user_id, 'model', dynamic_system_prompt)
+            logger.info(f"Added initial dynamic system prompt for question {current_question_id}")
+        else:
+            # If conversation history exists, update the first message
+            conversation_manager.conversations[user_id][0]['content'] = dynamic_system_prompt
+            logger.info(f"Updated existing system prompt for question {current_question_id}")
+        
+        # Get response from Gemini with Virgil personality and the updated system prompt
         response_text = generate_gemini_response(
             user_id,
-            message.text
+            message.text,
+            custom_system_prompt=dynamic_system_prompt
         )
         
         # Send text response
@@ -994,18 +999,25 @@ def handle_audio(message):
         if hasattr(bot, 'session_data') and user_id in bot.session_data:
             question_path = bot.session_data[user_id].get('question_path', [])
         
-        # Check if we need to update the system prompt
-        if not conversation_manager.conversations[user_id]:
-            # If no conversation history, generate a new dynamic prompt
-            dynamic_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
-            conversation_manager.add_message(user_id, 'model', dynamic_system_prompt)
-            logger.info(f"Added dynamic system prompt for question {current_question_id}")
+        # Always regenerate the dynamic system prompt to ensure it's up to date
+        dynamic_system_prompt = generate_dynamic_system_prompt(current_question_id, question_path)
         
-        # Generate response
+        # Check if we need to update the system prompt in conversation history
+        if not conversation_manager.conversations[user_id]:
+            # If no conversation history, add the dynamic prompt
+            conversation_manager.add_message(user_id, 'model', dynamic_system_prompt)
+            logger.info(f"Added initial dynamic system prompt for question {current_question_id}")
+        else:
+            # If conversation history exists, update the first message
+            conversation_manager.conversations[user_id][0]['content'] = dynamic_system_prompt
+            logger.info(f"Updated existing system prompt for question {current_question_id}")
+        
+        # Generate response with the updated system prompt
         response_text = generate_gemini_response(
             user_id,
             "Audio message sent",
-            gemini_file
+            gemini_file,
+            custom_system_prompt=dynamic_system_prompt
         )
         
         # Delete processing message
